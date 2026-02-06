@@ -6,10 +6,13 @@
 
 // Import other scripts (paths relative to extension root)
 try {
-    importScripts('/lib/logger.js', '/lib/telemetry.js');
+    importScripts('/lib/logger.js', '/lib/native-logger.js', '/lib/telemetry.js');
 } catch (e) {
     console.error('[OpenBDR] Failed to import scripts:', e);
 }
+
+// Active logger instance (nativeLogger or fallback logger)
+let activeLogger = null;
 
 // ============================================================================
 // INITIALIZATION
@@ -21,29 +24,80 @@ try {
 async function initialize() {
     console.log('[OpenBDR] Initializing background service worker...');
 
-    // Initialize logger
-    await logger.init();
+    // Try to connect to native host first
+    try {
+        await nativeLogger.init();
+        if (nativeLogger.isConnected()) {
+            activeLogger = nativeLogger;
+            console.log('[OpenBDR] Using native messaging logger');
+        } else {
+            throw new Error('Native host not connected');
+        }
+    } catch (e) {
+        console.warn('[OpenBDR] Native host unavailable, using fallback logger:', e.message);
+        await logger.init();
+        activeLogger = logger;
+    }
 
     // Collect and log browser environment info
     const browserInfo = await collectBrowserInfo();
-    await logger.log('browser.info', browserInfo);
+    await activeLogger.log('browser.info', browserInfo);
 
     // Log installed extensions
     const extensions = await getInstalledExtensions();
-    await logger.log('browser.extensions', {
+    await activeLogger.log('browser.extensions', {
         count: extensions.length,
         extensions: extensions
     });
 
     // Log own permissions
     const permissions = await getOwnPermissions();
-    await logger.log('browser.permissions', permissions);
+    await activeLogger.log('browser.permissions', permissions);
 
     console.log('[OpenBDR] Initialization complete. Telemetry collection active.');
 }
 
 // Run initialization
 initialize().catch(e => console.error('[OpenBDR] Init failed:', e));
+
+// ============================================================================
+// BROWSER LIFECYCLE HANDLING
+// ============================================================================
+
+/**
+ * Handle browser startup - Chrome doesn't have a direct event, but service worker
+ * loading is essentially the same as browser start for extensions
+ */
+chrome.runtime.onStartup.addListener(() => {
+    console.log('[OpenBDR] Browser startup detected');
+    initialize().catch(e => console.error('[OpenBDR] Startup init failed:', e));
+});
+
+/**
+ * Handle extension install/update
+ */
+chrome.runtime.onInstalled.addListener((details) => {
+    console.log(`[OpenBDR] Extension ${details.reason}`);
+    if (activeLogger) {
+        activeLogger.log('extension.lifecycle', {
+            event: details.reason,
+            previousVersion: details.previousVersion || null
+        });
+    }
+});
+
+/**
+ * Handle browser shutdown (service worker suspend)
+ * This is called when the service worker is about to be terminated
+ */
+chrome.runtime.onSuspend.addListener(() => {
+    console.log('[OpenBDR] Browser shutdown/suspend detected');
+
+    // Send session end if using native logger
+    if (activeLogger === nativeLogger && nativeLogger.isConnected()) {
+        nativeLogger.sendSessionEnd();
+    }
+});
 
 // ============================================================================
 // TAB EVENT LISTENERS
@@ -535,8 +589,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // ============================================================================
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // Ensure activeLogger is available
+    const log = activeLogger || logger;
+
     if (message.type === 'LOG_EVENT') {
-        logger.log(message.eventType, message.payload, {
+        log.log(message.eventType, message.payload, {
             tabId: sender.tab?.id,
             url: sender.tab?.url,
             frameId: sender.frameId,
@@ -549,33 +606,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === 'GET_STATS') {
-        logger.getStats().then(stats => {
+        log.getStats().then(stats => {
+            // Add native host connection status
+            stats.nativeHostConnected = nativeLogger.isConnected();
+            stats.usingNativeHost = (activeLogger === nativeLogger);
             sendResponse(stats);
         });
         return true;
     }
 
     if (message.type === 'FLUSH_NOW') {
-        logger.flushToFile('manual').then(filename => {
-            if (filename) {
-                sendResponse({ success: true, filename });
-            } else {
-                sendResponse({ success: false, message: 'No events to flush' });
-            }
-        }).catch(e => {
-            sendResponse({ success: false, error: e.message });
-        });
+        // For native logger, flush is immediate; for fallback, use flushToFile
+        if (activeLogger === nativeLogger) {
+            nativeLogger.flushBuffer().then(() => {
+                sendResponse({ success: true, message: 'Buffer flushed to native host' });
+            }).catch(e => {
+                sendResponse({ success: false, error: e.message });
+            });
+        } else {
+            logger.flushToFile('manual').then(filename => {
+                if (filename) {
+                    sendResponse({ success: true, filename });
+                } else {
+                    sendResponse({ success: false, message: 'No events to flush' });
+                }
+            }).catch(e => {
+                sendResponse({ success: false, error: e.message });
+            });
+        }
         return true;
     }
 
     if (message.type === 'UPDATE_CONFIG') {
         (async () => {
             try {
-                if (message.config.outputDir !== undefined) {
-                    await logger.setOutputDir(message.config.outputDir);
-                }
-                if (message.config.autoFlush !== undefined) {
-                    await logger.setAutoFlush(message.config.autoFlush);
+                if (activeLogger === nativeLogger && nativeLogger.isConnected()) {
+                    await nativeLogger.setConfig(message.config);
+                } else {
+                    if (message.config.outputDir !== undefined) {
+                        await logger.setOutputDir(message.config.outputDir);
+                    }
+                    if (message.config.autoFlush !== undefined) {
+                        await logger.setAutoFlush(message.config.autoFlush);
+                    }
                 }
                 sendResponse({ success: true });
             } catch (e) {
@@ -586,7 +659,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === 'CLEAR_LOGS') {
-        logger.clear().then(() => {
+        log.clear().then(() => {
             sendResponse({ success: true });
         }).catch(e => {
             sendResponse({ success: false, error: e.message });
@@ -595,11 +668,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === 'GET_EVENT_COUNT') {
-        sendResponse({ count: logger.getEventCount() });
+        sendResponse({ count: log.getEventCount() });
         return false;
     }
 });
 
 // Log service worker activation
 console.log('[OpenBDR] Background service worker loaded');
-

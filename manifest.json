@@ -14,7 +14,8 @@
         "scripting",
         "clipboardRead",
         "management",
-        "alarms"
+        "alarms",
+        "nativeMessaging"
     ],
     "host_permissions": [
         "<all_urls>"

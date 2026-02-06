@@ -44,42 +44,45 @@ function renderStats(stats) {
     `)
         .join('') || '<div class="event-type-row"><span class="event-type-name">No events yet</span></div>';
 
+    // Native host status
+    const nativeStatus = stats.nativeHostConnected
+        ? '<span class="status-connected">● Native Host</span>'
+        : '<span class="status-fallback">○ Fallback Mode</span>';
+
+    // Current log file (truncated for display)
+    const currentFile = stats.currentFile
+        ? stats.currentFile.replace(/.*\//, '.../')
+        : stats.currentPartition || 'Not writing yet';
+
     contentEl.innerHTML = `
+    <div class="connection-status">
+      ${nativeStatus}
+      <span class="status-size">${stats.currentSizeMB || stats.bufferSizeMB || '0.00'} MB</span>
+    </div>
+    
     <div class="stats-grid">
       <div class="stat-card">
         <div class="stat-value">${stats.eventCount || 0}</div>
         <div class="stat-label">Events</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value">${stats.bufferSizeMB || '0.00'} MB</div>
-        <div class="stat-label">Buffer Size</div>
-      </div>
-      <div class="stat-card">
         <div class="stat-value">${stats.fileSequence || 1}</div>
         <div class="stat-label">File #</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${stats.flushThresholdMB || 45} MB</div>
-        <div class="stat-label">Auto-Flush At</div>
       </div>
     </div>
     
     <div class="partition-info">
-      <div class="label">Current Partition</div>
-      <div class="path">${stats.outputDir || 'openbdr_logs'}/${stats.currentPartition || 'year=.../...'}</div>
+      <div class="label">Log Path</div>
+      <div class="path">${stats.logDir || stats.outputDir || '~/.openbdr/logs'}/${stats.currentPartition || 'year=.../...'}</div>
     </div>
     
     <div class="settings-section">
       <h3>Settings</h3>
       <div class="setting-row">
-        <span class="setting-label">Output Directory</span>
-        <input type="text" id="outputDir" class="setting-input" 
-               value="${stats.outputDir || 'openbdr_logs'}" 
-               placeholder="openbdr_logs">
-      </div>
-      <div class="setting-row">
-        <span class="setting-label">Auto-Flush (Hourly)</span>
-        <div id="autoFlushToggle" class="toggle ${stats.autoFlush !== false ? 'active' : ''}"></div>
+        <span class="setting-label">Log Directory</span>
+        <input type="text" id="logDir" class="setting-input" 
+               value="${stats.logDir || stats.outputDir || '/var/log/openbdr'}" 
+               placeholder="/var/log/openbdr">
       </div>
     </div>
     
@@ -89,8 +92,8 @@ function renderStats(stats) {
     </div>
     
     <div class="actions">
-      <button id="flushBtn" class="btn-primary">Flush Now</button>
-      <button id="saveBtn" class="btn-secondary">Save Settings</button>
+      <button id="flushBtn" class="btn-primary">Flush</button>
+      <button id="saveBtn" class="btn-secondary">Save</button>
       <button id="clearBtn" class="btn-danger">Clear</button>
     </div>
   `;
@@ -127,21 +130,20 @@ function setupEventListeners() {
     // Save Settings button
     document.getElementById('saveBtn')?.addEventListener('click', async () => {
         const btn = document.getElementById('saveBtn');
-        const outputDir = document.getElementById('outputDir')?.value || 'openbdr_logs';
-        const autoFlush = document.getElementById('autoFlushToggle')?.classList.contains('active');
+        const logDir = document.getElementById('logDir')?.value || '/var/log/openbdr';
 
         btn.textContent = 'Saving...';
 
         try {
             await chrome.runtime.sendMessage({
                 type: 'UPDATE_CONFIG',
-                config: { outputDir, autoFlush }
+                config: { logDir }
             });
             btn.textContent = 'Saved!';
-            setTimeout(() => { btn.textContent = 'Save Settings'; }, 1500);
+            setTimeout(() => { btn.textContent = 'Save'; }, 1500);
         } catch (e) {
             btn.textContent = 'Error';
-            setTimeout(() => { btn.textContent = 'Save Settings'; }, 1500);
+            setTimeout(() => { btn.textContent = 'Save'; }, 1500);
         }
     });
 

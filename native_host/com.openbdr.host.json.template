@@ -1,0 +1,9 @@
+{
+  "name": "com.openbdr.host",
+  "description": "OpenBDR Native Logging Host - Direct file system access for browser telemetry",
+  "path": "__INSTALL_PATH__/openbdr_host.py",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://__EXTENSION_ID__/"
+  ]
+}
