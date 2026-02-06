@@ -4,8 +4,12 @@
  * Security Relevance: Captures all major browser events for security monitoring.
  */
 
-// Import other scripts
-importScripts('../lib/logger.js', '../lib/telemetry.js');
+// Import other scripts (paths relative to extension root)
+try {
+    importScripts('/lib/logger.js', '/lib/telemetry.js');
+} catch (e) {
+    console.error('[OpenBDR] Failed to import scripts:', e);
+}
 
 // ============================================================================
 // INITIALIZATION
