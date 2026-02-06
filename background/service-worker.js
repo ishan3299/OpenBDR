@@ -538,12 +538,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
     }
 
-    if (message.type === 'EXPORT_LOGS') {
-        logger.exportToFile().then(filename => {
-            sendResponse({ success: true, filename });
+    if (message.type === 'FLUSH_NOW') {
+        logger.flushToFile('manual').then(filename => {
+            if (filename) {
+                sendResponse({ success: true, filename });
+            } else {
+                sendResponse({ success: false, message: 'No events to flush' });
+            }
         }).catch(e => {
             sendResponse({ success: false, error: e.message });
         });
+        return true;
+    }
+
+    if (message.type === 'UPDATE_CONFIG') {
+        (async () => {
+            try {
+                if (message.config.outputDir !== undefined) {
+                    await logger.setOutputDir(message.config.outputDir);
+                }
+                if (message.config.autoFlush !== undefined) {
+                    await logger.setAutoFlush(message.config.autoFlush);
+                }
+                sendResponse({ success: true });
+            } catch (e) {
+                sendResponse({ success: false, error: e.message });
+            }
+        })();
         return true;
     }
 
@@ -564,3 +585,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Log service worker activation
 console.log('[OpenBDR] Background service worker loaded');
+
