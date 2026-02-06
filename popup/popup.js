@@ -44,20 +44,13 @@ function renderStats(stats) {
     `)
         .join('') || '<div class="event-type-row"><span class="event-type-name">No events yet</span></div>';
 
-    // Native host status
-    const nativeStatus = stats.nativeHostConnected
-        ? '<span class="status-connected">● Native Host</span>'
-        : '<span class="status-fallback">○ Fallback Mode</span>';
-
-    // Current log file (truncated for display)
-    const currentFile = stats.currentFile
-        ? stats.currentFile.replace(/.*\//, '.../')
-        : stats.currentPartition || 'Not writing yet';
+    // Storage type indicator
+    const storageType = stats.storageType || 'IndexedDB';
 
     contentEl.innerHTML = `
     <div class="connection-status">
-      ${nativeStatus}
-      <span class="status-size">${stats.currentSizeMB || stats.bufferSizeMB || '0.00'} MB</span>
+      <span class="status-connected">● ${storageType}</span>
+      <span class="status-size">${stats.bufferSizeMB || '0.00'} MB</span>
     </div>
     
     <div class="stats-grid">
@@ -72,17 +65,17 @@ function renderStats(stats) {
     </div>
     
     <div class="partition-info">
-      <div class="label">Log Path</div>
-      <div class="path">${stats.logDir || stats.outputDir || '~/.openbdr/logs'}/${stats.currentPartition || 'year=.../...'}</div>
+      <div class="label">Export Path (in Downloads)</div>
+      <div class="path">${stats.outputDir || 'openbdr_logs'}/${stats.currentPartition || 'year=.../...'}</div>
     </div>
     
     <div class="settings-section">
       <h3>Settings</h3>
       <div class="setting-row">
-        <span class="setting-label">Log Directory</span>
-        <input type="text" id="logDir" class="setting-input" 
-               value="${stats.logDir || stats.outputDir || '/var/log/openbdr'}" 
-               placeholder="/var/log/openbdr">
+        <span class="setting-label">Output Folder Name</span>
+        <input type="text" id="outputDir" class="setting-input" 
+               value="${stats.outputDir || 'openbdr_logs'}" 
+               placeholder="openbdr_logs">
       </div>
     </div>
     
@@ -92,7 +85,7 @@ function renderStats(stats) {
     </div>
     
     <div class="actions">
-      <button id="flushBtn" class="btn-primary">Flush</button>
+      <button id="flushBtn" class="btn-primary">Export Now</button>
       <button id="saveBtn" class="btn-secondary">Save</button>
       <button id="clearBtn" class="btn-danger">Clear</button>
     </div>
@@ -130,14 +123,14 @@ function setupEventListeners() {
     // Save Settings button
     document.getElementById('saveBtn')?.addEventListener('click', async () => {
         const btn = document.getElementById('saveBtn');
-        const logDir = document.getElementById('logDir')?.value || '/var/log/openbdr';
+        const outputDir = document.getElementById('outputDir')?.value || 'openbdr_logs';
 
         btn.textContent = 'Saving...';
 
         try {
             await chrome.runtime.sendMessage({
                 type: 'UPDATE_CONFIG',
-                config: { logDir }
+                config: { outputDir }
             });
             btn.textContent = 'Saved!';
             setTimeout(() => { btn.textContent = 'Save'; }, 1500);
