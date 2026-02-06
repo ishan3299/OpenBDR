@@ -4,8 +4,8 @@
  * Security Relevance: Captures all major browser events for security monitoring.
  */
 
-import { logger } from '../lib/logger.js';
-import { collectBrowserInfo, getInstalledExtensions, getOwnPermissions } from '../lib/telemetry.js';
+// Import other scripts
+importScripts('../lib/logger.js', '../lib/telemetry.js');
 
 // ============================================================================
 // INITIALIZATION
@@ -555,18 +555,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'GET_EVENT_COUNT') {
         sendResponse({ count: logger.getEventCount() });
         return false;
-    }
-});
-
-// ============================================================================
-// ALARM FOR PERIODIC TASKS
-// ============================================================================
-
-chrome.alarms.create('periodicFlush', { periodInMinutes: 1 });
-
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-    if (alarm.name === 'periodicFlush') {
-        await logger.flush();
     }
 });
 

@@ -1,60 +1,61 @@
 {
-  "manifest_version": 3,
-  "name": "OpenBDR - Browser Detection & Response",
-  "version": "1.0.0",
-  "description": "Comprehensive browser-side telemetry collection for security detection, investigation, and response.",
-  "author": "Ishan Patel <ishan.patel1998@gmail.com>",
-  
-  "permissions": [
-    "tabs",
-    "webNavigation",
-    "webRequest",
-    "downloads",
-    "storage",
-    "activeTab",
-    "scripting",
-    "clipboardRead",
-    "management"
-  ],
-  
-  "host_permissions": [
-    "<all_urls>"
-  ],
-  
-  "background": {
-    "service_worker": "background/service-worker.js",
-    "type": "module"
-  },
-  
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["lib/utils.js", "content/content-script.js"],
-      "run_at": "document_start",
-      "all_frames": true
-    }
-  ],
-  
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
+    "manifest_version": 3,
+    "name": "OpenBDR - Browser Detection & Response",
+    "version": "1.0.0",
+    "description": "Comprehensive browser-side telemetry collection for security detection, investigation, and response.",
+    "author": "Ishan Patel <ishan.patel1998@gmail.com>",
+    "permissions": [
+        "tabs",
+        "webNavigation",
+        "webRequest",
+        "downloads",
+        "storage",
+        "activeTab",
+        "scripting",
+        "clipboardRead",
+        "management"
+    ],
+    "host_permissions": [
+        "<all_urls>"
+    ],
+    "background": {
+        "service_worker": "background/service-worker.js"
     },
-    "default_title": "OpenBDR Telemetry"
-  },
-  
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
-  },
-  
-  "web_accessible_resources": [
-    {
-      "resources": ["lib/*.js"],
-      "matches": ["<all_urls>"]
-    }
-  ]
+    "content_scripts": [
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "lib/utils.js",
+                "content/content-script.js"
+            ],
+            "run_at": "document_start",
+            "all_frames": true
+        }
+    ],
+    "action": {
+        "default_popup": "popup/popup.html",
+        "default_icon": {
+            "16": "icons/icon16.png",
+            "48": "icons/icon48.png",
+            "128": "icons/icon128.png"
+        },
+        "default_title": "OpenBDR Telemetry"
+    },
+    "icons": {
+        "16": "icons/icon16.png",
+        "48": "icons/icon48.png",
+        "128": "icons/icon128.png"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "lib/*.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ]
 }
