@@ -514,6 +514,23 @@ chrome.management.onUninstalled.addListener(async (id) => {
 });
 
 // ============================================================================
+// ALARM LISTENER FOR AUTO-FLUSH
+// Security Relevance: Periodic telemetry export ensures data persistence
+// ============================================================================
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'openbdr_hourly_flush') {
+        logger.flushToFile('hourly').then(filename => {
+            if (filename) {
+                console.log(`[OpenBDR] Hourly flush completed: ${filename}`);
+            }
+        }).catch(e => {
+            console.error('[OpenBDR] Hourly flush failed:', e);
+        });
+    }
+});
+
+// ============================================================================
 // MESSAGE HANDLER FOR CONTENT SCRIPT COMMUNICATION
 // ============================================================================
 
