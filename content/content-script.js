@@ -14,8 +14,15 @@ if (!window.__OPENBDR_INITIALIZED__) {
 
     /**
      * Send event to background script for logging
+     * Checks if extension context is still valid before sending
      */
     function logEvent(eventType, payload) {
+        // Check if extension context is still valid
+        if (!chrome.runtime || !chrome.runtime.id) {
+            // Extension was reloaded, stop trying to send messages
+            return;
+        }
+
         try {
             chrome.runtime.sendMessage({
                 type: 'LOG_EVENT',
@@ -23,8 +30,14 @@ if (!window.__OPENBDR_INITIALIZED__) {
                 payload: payload,
             });
         } catch (e) {
-            // Extension context may be invalidated
-            console.warn('[OpenBDR] Failed to log event:', e);
+            // Extension context may be invalidated - this is normal after extension reload
+            if (e.message && e.message.includes('Extension context invalidated')) {
+                console.log('[OpenBDR] Extension reloaded, content script will stop logging');
+                // Set flag to prevent future logging attempts
+                window.__OPENBDR_INITIALIZED__ = false;
+            } else {
+                console.warn('[OpenBDR] Failed to log event:', e);
+            }
         }
     }
 
