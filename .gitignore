@@ -1,6 +1,7 @@
 # Instructions/internal docs
 instructions.md
 INSTRUCTIONS.md
+GEMINI.md
 
 # OS generated files
 .DS_Store
@@ -28,9 +29,17 @@ dist/
 build/
 *.zip
 
-# Logs
+# Logs and Databases
 *.log
 logs/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
 
 # Environment files
 .env
@@ -40,3 +49,7 @@ logs/
 # Chrome extension development
 *.crx
 *.pem
+native_host/com.openbdr.host.json
+
+# Residual files
+test_bridge.py

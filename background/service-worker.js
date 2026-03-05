@@ -6,7 +6,7 @@
 
 // Import other scripts (paths relative to extension root)
 try {
-    importScripts('/lib/logger.js', '/lib/telemetry.js');
+    importScripts('/lib/native-logger.js', '/lib/utils.js', '/lib/telemetry.js');
 } catch (e) {
     console.error('[OpenBDR] Failed to import scripts:', e);
 }
@@ -21,29 +21,63 @@ try {
 async function initialize() {
     console.log('[OpenBDR] Initializing background service worker...');
 
-    // Initialize IndexedDB logger
-    await logger.init();
+    // Initialize Native Logger (Mandatory SQLite Sink)
+    try {
+        await nativeLogger.init();
+    } catch (e) {
+        console.error('[OpenBDR] Native host initialization failed. Telemetry will buffer in memory.');
+    }
 
-    // Collect and log browser environment info
-    const browserInfo = await collectBrowserInfo();
-    await logger.log('browser.info', browserInfo);
+    // Smart Throttling: Only log full environment info once every 24 hours
+    const now = Date.now();
+    const storage = await chrome.storage.local.get('lastEnvLog');
+    const lastEnvLog = storage.lastEnvLog || 0;
+    const dayInMs = 24 * 60 * 60 * 1000;
 
-    // Log installed extensions
-    const extensions = await getInstalledExtensions();
-    await logger.log('browser.extensions', {
-        count: extensions.length,
-        extensions: extensions
-    });
+    if (now - lastEnvLog > dayInMs) {
+        // Collect and log browser environment info
+        const browserInfo = await collectBrowserInfo();
+        await dispatchLog('browser.info', browserInfo);
 
-    // Log own permissions
-    const permissions = await getOwnPermissions();
-    await logger.log('browser.permissions', permissions);
+        // Log installed extensions
+        const extensions = await getInstalledExtensions();
+        await dispatchLog('browser.extensions', {
+            count: extensions.length,
+            extensions: extensions
+        });
 
-    console.log('[OpenBDR] Initialization complete. Telemetry collection active.');
+        // Log own permissions
+        const permissions = await getOwnPermissions();
+        await dispatchLog('browser.permissions', permissions);
+
+        await chrome.storage.local.set({ lastEnvLog: now });
+        console.log('[OpenBDR] Environment telemetry collected and logged to SQLite.');
+    }
+
+    console.log('[OpenBDR] Initialization complete. Native SQLite logging active.');
 }
 
 // Run initialization
 initialize().catch(e => console.error('[OpenBDR] Init failed:', e));
+
+/**
+ * Unified log dispatcher that handles sanitization and mandatory native logging
+ * @param {string} eventType - The type of event to log
+ * @param {object} payload - The event payload
+ * @param {object} metadata - Optional metadata
+ */
+async function dispatchLog(eventType, payload, metadata = {}) {
+    // 1. Sanitize payload
+    const sanitizedPayload = OpenBDRUtils.sanitizePayload(payload);
+
+    // 2. Direct to Native Host (SQLite)
+    // The nativeLogger class handles internal in-memory buffering if disconnected
+    try {
+        return await nativeLogger.log(eventType, sanitizedPayload, metadata);
+    } catch (e) {
+        console.warn('[OpenBDR] Logging to native host failed:', e);
+    }
+}
 
 // ============================================================================
 // BROWSER LIFECYCLE HANDLING
@@ -62,7 +96,7 @@ chrome.runtime.onStartup.addListener(() => {
  */
 chrome.runtime.onInstalled.addListener((details) => {
     console.log(`[OpenBDR] Extension ${details.reason}`);
-    logger.log('extension.lifecycle', {
+    dispatchLog('extension.lifecycle', {
         event: details.reason,
         previousVersion: details.previousVersion || null
     });
@@ -73,7 +107,7 @@ chrome.runtime.onInstalled.addListener((details) => {
  */
 chrome.runtime.onSuspend.addListener(() => {
     console.log('[OpenBDR] Browser shutdown/suspend detected');
-    // Events are already persisted in IndexedDB, no flush needed
+    // Events are already persisted in IndexedDB or handled by native host
 });
 
 // ============================================================================
@@ -86,7 +120,7 @@ chrome.runtime.onSuspend.addListener(() => {
  * Security Relevance: New tabs may be spawned by malicious scripts
  */
 chrome.tabs.onCreated.addListener(async (tab) => {
-    await logger.log('tab.created', {
+    await dispatchLog('tab.created', {
         tabId: tab.id,
         windowId: tab.windowId,
         index: tab.index,
@@ -104,7 +138,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // Only log meaningful changes
     if (changeInfo.url || changeInfo.status === 'complete' || changeInfo.title) {
-        await logger.log('tab.updated', {
+        await dispatchLog('tab.updated', {
             tabId: tabId,
             windowId: tab.windowId,
             changeInfo: changeInfo,
@@ -120,7 +154,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
  * Security Relevance: Rapid tab creation/removal may indicate malicious activity
  */
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
-    await logger.log('tab.removed', {
+    await dispatchLog('tab.removed', {
         tabId: tabId,
         windowId: removeInfo.windowId,
         isWindowClosing: removeInfo.isWindowClosing,
@@ -132,7 +166,7 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
  * Security Relevance: Track user focus, detect tab-napping attacks
  */
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-    await logger.log('tab.activated', {
+    await dispatchLog('tab.activated', {
         tabId: activeInfo.tabId,
         windowId: activeInfo.windowId,
     });
@@ -143,7 +177,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
  * Security Relevance: Detect prerendering which could be used for tracking
  */
 chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
-    await logger.log('tab.replaced', {
+    await dispatchLog('tab.replaced', {
         addedTabId: addedTabId,
         removedTabId: removedTabId,
     });
@@ -159,7 +193,7 @@ chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
  * Security Relevance: Popup windows often used for phishing, ad fraud
  */
 chrome.windows.onCreated.addListener(async (window) => {
-    await logger.log('window.created', {
+    await dispatchLog('window.created', {
         windowId: window.id,
         type: window.type,
         state: window.state,
@@ -174,7 +208,7 @@ chrome.windows.onCreated.addListener(async (window) => {
  * Window removed event
  */
 chrome.windows.onRemoved.addListener(async (windowId) => {
-    await logger.log('window.removed', {
+    await dispatchLog('window.removed', {
         windowId: windowId,
     });
 });
@@ -184,7 +218,7 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
  * Security Relevance: Focus hijacking detection
  */
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
-    await logger.log('window.focusChanged', {
+    await dispatchLog('window.focusChanged', {
         windowId: windowId,
         noFocus: windowId === chrome.windows.WINDOW_ID_NONE,
     });
@@ -205,7 +239,7 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
         return;
     }
 
-    await logger.log('navigation.committed', {
+    await dispatchLog('navigation.committed', {
         tabId: details.tabId,
         url: details.url,
         frameId: details.frameId,
@@ -225,7 +259,7 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
         return;
     }
 
-    await logger.log('navigation.completed', {
+    await dispatchLog('navigation.completed', {
         tabId: details.tabId,
         url: details.url,
         frameId: details.frameId,
@@ -238,7 +272,7 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
  * Security Relevance: Failed navigations may indicate blocked malware domains
  */
 chrome.webNavigation.onErrorOccurred.addListener(async (details) => {
-    await logger.log('navigation.error', {
+    await dispatchLog('navigation.error', {
         tabId: details.tabId,
         url: details.url,
         frameId: details.frameId,
@@ -255,7 +289,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
         return;
     }
 
-    await logger.log('navigation.beforeNavigate', {
+    await dispatchLog('navigation.beforeNavigate', {
         tabId: details.tabId,
         url: details.url,
         frameId: details.frameId,
@@ -272,7 +306,7 @@ chrome.webNavigation.onDOMContentLoaded.addListener(async (details) => {
         return;
     }
 
-    await logger.log('navigation.domContentLoaded', {
+    await dispatchLog('navigation.domContentLoaded', {
         tabId: details.tabId,
         url: details.url,
         frameId: details.frameId,
@@ -284,7 +318,7 @@ chrome.webNavigation.onDOMContentLoaded.addListener(async (details) => {
  * Security Relevance: Detect SPA navigation, potential URL spoofing
  */
 chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
-    await logger.log('navigation.historyStateUpdated', {
+    await dispatchLog('navigation.historyStateUpdated', {
         tabId: details.tabId,
         url: details.url,
         frameId: details.frameId,
@@ -297,7 +331,7 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
  * Security Relevance: Track in-page navigation, anchor-based routing
  */
 chrome.webNavigation.onReferenceFragmentUpdated.addListener(async (details) => {
-    await logger.log('navigation.referenceFragmentUpdated', {
+    await dispatchLog('navigation.referenceFragmentUpdated', {
         tabId: details.tabId,
         url: details.url,
         frameId: details.frameId,
@@ -325,7 +359,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
         filename.toLowerCase().endsWith(ext)
     );
 
-    await logger.log('download.created', {
+    await dispatchLog('download.created', {
         id: downloadItem.id,
         url: downloadItem.url,
         finalUrl: downloadItem.finalUrl,
@@ -345,7 +379,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
  * Security Relevance: Track download completion, detect interrupted downloads
  */
 chrome.downloads.onChanged.addListener(async (delta) => {
-    await logger.log('download.changed', {
+    await dispatchLog('download.changed', {
         id: delta.id,
         state: delta.state,
         filename: delta.filename,
@@ -358,12 +392,17 @@ chrome.downloads.onChanged.addListener(async (delta) => {
 
 // ============================================================================
 // WEB REQUEST LISTENERS
-// Security Relevance: Network-level visibility for request analysis
+// Security Relevance: Network-level visibility for request analysis.
+// Optimization: Exclude high-volume, low-risk resource types to reduce load.
 // ============================================================================
+
+const WEB_REQUEST_FILTER = {
+    urls: ['<all_urls>'],
+    types: ['main_frame', 'sub_frame', 'script', 'xmlhttprequest', 'ping', 'websocket', 'other']
+};
 
 /**
  * Before request event
- * Security Relevance: Capture all outgoing requests with method and type
  */
 chrome.webRequest.onBeforeRequest.addListener(
     async (details) => {
@@ -373,7 +412,7 @@ chrome.webRequest.onBeforeRequest.addListener(
             return;
         }
 
-        await logger.log('webRequest.beforeRequest', {
+        await dispatchLog('webRequest.beforeRequest', {
             requestId: details.requestId,
             url: details.url,
             method: details.method,
@@ -383,12 +422,11 @@ chrome.webRequest.onBeforeRequest.addListener(
             initiator: details.initiator,
         });
     },
-    { urls: ['<all_urls>'] }
+    WEB_REQUEST_FILTER
 );
 
 /**
  * Response headers received event
- * Security Relevance: Track response status, detect suspicious responses
  */
 chrome.webRequest.onHeadersReceived.addListener(
     async (details) => {
@@ -417,7 +455,7 @@ chrome.webRequest.onHeadersReceived.addListener(
             });
         }
 
-        await logger.log('webRequest.headersReceived', {
+        await dispatchLog('webRequest.headersReceived', {
             requestId: details.requestId,
             url: details.url,
             statusCode: details.statusCode,
@@ -427,13 +465,12 @@ chrome.webRequest.onHeadersReceived.addListener(
             securityHeaders: securityHeaders,
         });
     },
-    { urls: ['<all_urls>'] },
+    WEB_REQUEST_FILTER,
     ['responseHeaders']
 );
 
 /**
  * Request completed event
- * Security Relevance: Track successful request completions
  */
 chrome.webRequest.onCompleted.addListener(
     async (details) => {
@@ -442,7 +479,7 @@ chrome.webRequest.onCompleted.addListener(
             return;
         }
 
-        await logger.log('webRequest.completed', {
+        await dispatchLog('webRequest.completed', {
             requestId: details.requestId,
             url: details.url,
             statusCode: details.statusCode,
@@ -451,16 +488,15 @@ chrome.webRequest.onCompleted.addListener(
             fromCache: details.fromCache,
         });
     },
-    { urls: ['<all_urls>'] }
+    WEB_REQUEST_FILTER
 );
 
 /**
  * Request error event
- * Security Relevance: Track failed requests, detect blocked connections
  */
 chrome.webRequest.onErrorOccurred.addListener(
     async (details) => {
-        await logger.log('webRequest.error', {
+        await dispatchLog('webRequest.error', {
             requestId: details.requestId,
             url: details.url,
             error: details.error,
@@ -469,16 +505,15 @@ chrome.webRequest.onErrorOccurred.addListener(
             initiator: details.initiator,
         });
     },
-    { urls: ['<all_urls>'] }
+    WEB_REQUEST_FILTER
 );
 
 /**
  * Before redirect event
- * Security Relevance: Track redirect chains, detect suspicious redirects
  */
 chrome.webRequest.onBeforeRedirect.addListener(
     async (details) => {
-        await logger.log('webRequest.redirect', {
+        await dispatchLog('webRequest.redirect', {
             requestId: details.requestId,
             url: details.url,
             redirectUrl: details.redirectUrl,
@@ -487,7 +522,7 @@ chrome.webRequest.onBeforeRedirect.addListener(
             tabId: details.tabId,
         });
     },
-    { urls: ['<all_urls>'] }
+    WEB_REQUEST_FILTER
 );
 
 // ============================================================================
@@ -500,7 +535,7 @@ chrome.webRequest.onBeforeRedirect.addListener(
  * Security Relevance: New extensions could be malicious
  */
 chrome.management.onInstalled.addListener(async (info) => {
-    await logger.log('extension.installed', {
+    await dispatchLog('extension.installed', {
         id: info.id,
         name: info.name,
         version: info.version,
@@ -515,7 +550,7 @@ chrome.management.onInstalled.addListener(async (info) => {
  * Security Relevance: Previously disabled malicious extension re-enabled
  */
 chrome.management.onEnabled.addListener(async (info) => {
-    await logger.log('extension.enabled', {
+    await dispatchLog('extension.enabled', {
         id: info.id,
         name: info.name,
         version: info.version,
@@ -527,7 +562,7 @@ chrome.management.onEnabled.addListener(async (info) => {
  * Security Relevance: Security extension disabled could indicate compromise
  */
 chrome.management.onDisabled.addListener(async (info) => {
-    await logger.log('extension.disabled', {
+    await dispatchLog('extension.disabled', {
         id: info.id,
         name: info.name,
         version: info.version,
@@ -539,26 +574,9 @@ chrome.management.onDisabled.addListener(async (info) => {
  * Security Relevance: Track extension removal
  */
 chrome.management.onUninstalled.addListener(async (id) => {
-    await logger.log('extension.uninstalled', {
+    await dispatchLog('extension.uninstalled', {
         id: id,
     });
-});
-
-// ============================================================================
-// ALARM LISTENER FOR AUTO-FLUSH
-// Security Relevance: Periodic telemetry export ensures data persistence
-// ============================================================================
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'openbdr_hourly_flush') {
-        logger.flushToFile('hourly').then(filename => {
-            if (filename) {
-                console.log(`[OpenBDR] Hourly flush completed: ${filename}`);
-            }
-        }).catch(e => {
-            console.error('[OpenBDR] Hourly flush failed:', e);
-        });
-    }
 });
 
 // ============================================================================
@@ -567,7 +585,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'LOG_EVENT') {
-        logger.log(message.eventType, message.payload, {
+        dispatchLog(message.eventType, message.payload, {
             tabId: sender.tab?.id,
             url: sender.tab?.url,
             frameId: sender.frameId,
@@ -579,39 +597,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
     }
 
-    if (message.type === 'GET_STATS') {
-        logger.getStats().then(stats => {
-            sendResponse(stats);
-        });
-        return true;
-    }
-
-    if (message.type === 'FLUSH_NOW') {
-        logger.flushToFile('manual').then(filename => {
-            if (filename) {
-                sendResponse({ success: true, filename });
-            } else {
-                sendResponse({ success: false, message: 'No events to flush' });
-            }
-        }).catch(e => {
-            sendResponse({ success: false, error: e.message });
-        });
-        return true;
-    }
-
-    if (message.type === 'UPDATE_CONFIG') {
+    if (message.type === 'LOG_BATCH') {
         (async () => {
             try {
-                if (message.config.outputDir !== undefined) {
-                    await logger.setOutputDir(message.config.outputDir);
+                const results = [];
+                for (const event of (message.events || [])) {
+                    const result = await dispatchLog(event.eventType, event.payload, {
+                        ...event.metadata,
+                        tabId: sender.tab?.id,
+                        url: sender.tab?.url,
+                        frameId: sender.frameId,
+                    });
+                    results.push(result);
                 }
-                if (message.config.autoFlush !== undefined) {
-                    await logger.setAutoFlush(message.config.autoFlush);
-                }
-                if (message.config.logDir !== undefined) {
-                    await logger.setOutputDir(message.config.logDir);
-                }
-                sendResponse({ success: true });
+                sendResponse({ success: true, count: results.length });
             } catch (e) {
                 sendResponse({ success: false, error: e.message });
             }
@@ -619,19 +618,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
     }
 
-    if (message.type === 'CLEAR_LOGS') {
-        logger.clear().then(() => {
-            sendResponse({ success: true });
-        }).catch(e => {
-            sendResponse({ success: false, error: e.message });
+    if (message.type === 'GET_STATS') {
+        // Fetch stats directly from the SQLite-backed Native Host
+        nativeLogger.getStats().then(stats => {
+            sendResponse(stats);
         });
         return true;
     }
 
-    if (message.type === 'GET_EVENT_COUNT') {
-        logger.getEventCount().then(count => {
-            sendResponse({ count });
+    if (message.type === 'RECONNECT_HOST') {
+        nativeLogger.init().then(connected => {
+            sendResponse({ success: connected });
         });
+        return true;
+    }
+
+    if (message.type === 'UPDATE_CONFIG') {
+        (async () => {
+            try {
+                if (message.config.dbFile !== undefined) {
+                    await nativeLogger.setConfig({ dbFile: message.config.dbFile });
+                }
+                sendResponse({ success: true });
+            } catch (e) {
+                sendResponse({ success: false, error: e.message });
+            }
+        })();
         return true;
     }
 });

@@ -44,50 +44,45 @@ function renderStats(stats) {
     `)
         .join('') || '<div class="event-type-row"><span class="event-type-name">No events yet</span></div>';
 
-    // Storage type indicator
-    const storageType = stats.storageType || 'IndexedDB';
+    const connectedClass = stats.connected ? 'status-connected' : 'status-fallback';
+    const statusText = stats.connected ? '● SQLite (Connected)' : '● Offline (Buffering)';
 
     contentEl.innerHTML = `
     <div class="connection-status">
-      <span class="status-connected">● ${storageType}</span>
-      <span class="status-size">${stats.bufferSizeMB || '0.00'} MB</span>
+      <span class="${connectedClass}">${statusText}</span>
+      <span class="status-size">${stats.bufferedEvents || 0} buffered</span>
     </div>
     
     <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-value">${stats.eventCount || 0}</div>
-        <div class="stat-label">Events</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${stats.fileSequence || 1}</div>
-        <div class="stat-label">File #</div>
+      <div class="stat-card full">
+        <div class="stat-value">${stats.totalEvents || 0}</div>
+        <div class="stat-label">Total Events in SQLite</div>
       </div>
     </div>
     
     <div class="partition-info">
-      <div class="label">Export Path (in Downloads)</div>
-      <div class="path">${stats.outputDir || 'openbdr_logs'}/${stats.currentPartition || 'year=.../...'}</div>
+      <div class="label">Database Location</div>
+      <div class="path">${stats.dbFile || '~/.openbdr/openbdr.db'}</div>
     </div>
     
     <div class="settings-section">
       <h3>Settings</h3>
       <div class="setting-row">
-        <span class="setting-label">Output Folder Name</span>
-        <input type="text" id="outputDir" class="setting-input" 
-               value="${stats.outputDir || 'openbdr_logs'}" 
-               placeholder="openbdr_logs">
+        <span class="setting-label">Database Path</span>
+        <input type="text" id="dbFile" class="setting-input" 
+               value="${stats.dbFile || ''}" 
+               placeholder="~/.openbdr/openbdr.db">
       </div>
     </div>
     
     <div class="event-types">
-      <h3>Event Types</h3>
+      <h3>Session Breakdown</h3>
       ${eventTypesHtml}
     </div>
     
     <div class="actions">
-      <button id="flushBtn" class="btn-primary">Export Now</button>
-      <button id="saveBtn" class="btn-secondary">Save</button>
-      <button id="clearBtn" class="btn-danger">Clear</button>
+      <button id="reconnectBtn" class="btn-primary">Reconnect Host</button>
+      <button id="saveBtn" class="btn-secondary">Update Path</button>
     </div>
   `;
 
@@ -99,66 +94,44 @@ function renderStats(stats) {
  * Setup button event listeners
  */
 function setupEventListeners() {
-    // Flush Now button
-    document.getElementById('flushBtn')?.addEventListener('click', async () => {
-        const btn = document.getElementById('flushBtn');
-        btn.textContent = 'Flushing...';
+    // Reconnect button
+    document.getElementById('reconnectBtn')?.addEventListener('click', async () => {
+        const btn = document.getElementById('reconnectBtn');
+        btn.textContent = 'Connecting...';
         btn.disabled = true;
 
         try {
-            const result = await chrome.runtime.sendMessage({ type: 'FLUSH_NOW' });
+            const result = await chrome.runtime.sendMessage({ type: 'RECONNECT_HOST' });
             if (result?.success) {
-                btn.textContent = 'Flushed!';
+                btn.textContent = 'Connected!';
                 setTimeout(() => location.reload(), 1000);
             } else {
-                btn.textContent = result?.message || 'No events';
-                setTimeout(() => { btn.textContent = 'Flush Now'; btn.disabled = false; }, 2000);
+                btn.textContent = 'Failed to Connect';
+                setTimeout(() => { btn.textContent = 'Reconnect Host'; btn.disabled = false; }, 2000);
             }
         } catch (e) {
             btn.textContent = 'Error';
-            setTimeout(() => { btn.textContent = 'Flush Now'; btn.disabled = false; }, 2000);
+            setTimeout(() => { btn.textContent = 'Reconnect Host'; btn.disabled = false; }, 2000);
         }
     });
 
     // Save Settings button
     document.getElementById('saveBtn')?.addEventListener('click', async () => {
         const btn = document.getElementById('saveBtn');
-        const outputDir = document.getElementById('outputDir')?.value || 'openbdr_logs';
+        const dbFile = document.getElementById('dbFile')?.value;
 
-        btn.textContent = 'Saving...';
+        btn.textContent = 'Updating...';
 
         try {
             await chrome.runtime.sendMessage({
                 type: 'UPDATE_CONFIG',
-                config: { outputDir }
+                config: { dbFile }
             });
-            btn.textContent = 'Saved!';
-            setTimeout(() => { btn.textContent = 'Save'; }, 1500);
+            btn.textContent = 'Updated!';
+            setTimeout(() => location.reload(), 1500);
         } catch (e) {
             btn.textContent = 'Error';
-            setTimeout(() => { btn.textContent = 'Save'; }, 1500);
+            setTimeout(() => { btn.textContent = 'Update Path'; }, 1500);
         }
-    });
-
-    // Clear button
-    document.getElementById('clearBtn')?.addEventListener('click', async () => {
-        if (!confirm('Clear all pending events? This cannot be undone.')) return;
-
-        const btn = document.getElementById('clearBtn');
-        btn.textContent = 'Clearing...';
-
-        try {
-            await chrome.runtime.sendMessage({ type: 'CLEAR_LOGS' });
-            btn.textContent = 'Cleared!';
-            setTimeout(() => location.reload(), 1000);
-        } catch (e) {
-            btn.textContent = 'Error';
-            setTimeout(() => { btn.textContent = 'Clear'; }, 1500);
-        }
-    });
-
-    // Auto-flush toggle
-    document.getElementById('autoFlushToggle')?.addEventListener('click', function () {
-        this.classList.toggle('active');
     });
 }

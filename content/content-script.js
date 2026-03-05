@@ -9,37 +9,81 @@ if (!window.__OPENBDR_INITIALIZED__) {
     window.__OPENBDR_INITIALIZED__ = true;
 
     // ============================================================================
-    // UTILITY FUNCTIONS
+    // EVENT BUFFERING
     // ============================================================================
+
+    const eventBuffer = [];
+    const MAX_BUFFER_SIZE = 20;
+    const FLUSH_INTERVAL_MS = 2000;
+    let flushTimeout = null;
+
+    /**
+     * Send buffered events to background script
+     */
+    function flushEvents() {
+        if (eventBuffer.length === 0) return;
+
+        // Check if extension context is still valid
+        if (!chrome.runtime || !chrome.runtime.id) {
+            eventBuffer.length = 0;
+            return;
+        }
+
+        const eventsToFlush = [...eventBuffer];
+        eventBuffer.length = 0;
+
+        if (flushTimeout) {
+            clearTimeout(flushTimeout);
+            flushTimeout = null;
+        }
+
+        try {
+            chrome.runtime.sendMessage({
+                type: 'LOG_BATCH',
+                events: eventsToFlush,
+            });
+        } catch (e) {
+            if (e.message && e.message.includes('Extension context invalidated')) {
+                window.__OPENBDR_INITIALIZED__ = false;
+            } else {
+                console.warn('[OpenBDR] Failed to flush events:', e);
+            }
+        }
+    }
 
     /**
      * Send event to background script for logging
      * Checks if extension context is still valid before sending
      */
     function logEvent(eventType, payload) {
-        // Check if extension context is still valid
-        if (!chrome.runtime || !chrome.runtime.id) {
-            // Extension was reloaded, stop trying to send messages
-            return;
-        }
-
-        try {
-            chrome.runtime.sendMessage({
-                type: 'LOG_EVENT',
-                eventType: eventType,
-                payload: payload,
-            });
-        } catch (e) {
-            // Extension context may be invalidated - this is normal after extension reload
-            if (e.message && e.message.includes('Extension context invalidated')) {
-                console.log('[OpenBDR] Extension reloaded, content script will stop logging');
-                // Set flag to prevent future logging attempts
-                window.__OPENBDR_INITIALIZED__ = false;
-            } else {
-                console.warn('[OpenBDR] Failed to log event:', e);
+        // Capture context IMMEDIATELY
+        const event = {
+            eventType,
+            payload,
+            metadata: {
+                ...getPageContext(),
+                timestamp: new Date().toISOString()
             }
+        };
+
+        eventBuffer.push(event);
+
+        // Flush if buffer is full
+        if (eventBuffer.length >= MAX_BUFFER_SIZE) {
+            flushEvents();
+        } else if (!flushTimeout) {
+            // Set timeout for periodic flush
+            flushTimeout = setTimeout(flushEvents, FLUSH_INTERVAL_MS);
         }
     }
+
+    // Flush on page unload or visibility change
+    window.addEventListener('beforeunload', flushEvents);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+            flushEvents();
+        }
+    });
 
     /**
      * Get current page context
@@ -59,21 +103,29 @@ if (!window.__OPENBDR_INITIALIZED__) {
     // ============================================================================
     // DOM MUTATION OBSERVER
     // Security Relevance: Detect dynamic content injection, script additions
+    // Optimization: Process only element nodes, truncate large content, throttle attribute logs
     // ============================================================================
+
+    const attributeLogHistory = new Map(); // Throttle map for attribute changes
 
     const mutationObserver = new MutationObserver((mutations) => {
         mutations.forEach((mutation) => {
             // Track added nodes
             mutation.addedNodes.forEach((node) => {
+                // Optimization: Skip non-element nodes (text, comments)
+                if (node.nodeType !== Node.ELEMENT_NODE) return;
+
                 // Script injection detection
                 if (node.nodeName === 'SCRIPT') {
+                    const textContent = node.textContent || '';
                     logEvent('dom.scriptInjected', {
                         src: node.src || null,
                         type: node.type || 'text/javascript',
                         async: node.async,
                         defer: node.defer,
-                        hasInlineCode: !node.src && node.textContent?.length > 0,
-                        inlineCodeLength: node.textContent?.length || 0,
+                        hasInlineCode: !node.src && textContent.length > 0,
+                        inlineCodeSnippet: !node.src ? textContent.substring(0, 1024) : null,
+                        inlineCodeLength: textContent.length,
                         ...getPageContext(),
                     });
                 }
@@ -108,31 +160,38 @@ if (!window.__OPENBDR_INITIALIZED__) {
                         ...getPageContext(),
                     });
                 }
-
-                // Link injection (for external resources)
-                if (node.nodeName === 'LINK') {
-                    logEvent('dom.linkInjected', {
-                        href: node.href || null,
-                        rel: node.rel || null,
-                        type: node.type || null,
-                        ...getPageContext(),
-                    });
-                }
             });
 
             // Track attribute changes on sensitive elements
             if (mutation.type === 'attributes') {
                 const target = mutation.target;
-                if (target.nodeName === 'SCRIPT' ||
-                    target.nodeName === 'IFRAME' ||
-                    target.nodeName === 'FORM') {
+                if (target.nodeType !== Node.ELEMENT_NODE) return;
+
+                const sensitiveTags = ['SCRIPT', 'IFRAME', 'FORM'];
+                if (sensitiveTags.includes(target.nodeName)) {
+                    const attrName = mutation.attributeName;
+                    const newValue = target.getAttribute(attrName);
+                    
+                    // Optimization: Throttle identical attribute changes (common in dynamic apps)
+                    const throttleKey = `${target.nodeName}-${attrName}-${newValue}`;
+                    const lastLogTime = attributeLogHistory.get(throttleKey) || 0;
+                    if (Date.now() - lastLogTime < 5000) return; // 5s cooldown for identical changes
+
                     logEvent('dom.attributeChanged', {
                         element: target.nodeName.toLowerCase(),
-                        attribute: mutation.attributeName,
+                        attribute: attrName,
                         oldValue: mutation.oldValue,
-                        newValue: target.getAttribute(mutation.attributeName),
+                        newValue: newValue,
                         ...getPageContext(),
                     });
+
+                    attributeLogHistory.set(throttleKey, Date.now());
+                    
+                    // Cleanup history map to prevent memory leak
+                    if (attributeLogHistory.size > 100) {
+                        const oldestKey = attributeLogHistory.keys().next().value;
+                        attributeLogHistory.delete(oldestKey);
+                    }
                 }
             }
         });
