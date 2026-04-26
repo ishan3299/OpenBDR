@@ -1,121 +1,63 @@
 # OpenBDR - Browser Detection & Response
 
-A comprehensive browser extension for security telemetry collection, designed for enterprise-grade detection, investigation, and response use cases.
+OpenBDR is a comprehensive browser-side security telemetry platform designed for enterprise-grade detection, investigation, and response. It monitors granular browser activity and employs advanced heuristics to detect threats like typosquatting and obfuscated scripts.
 
-## Overview
+## Core Features
 
-OpenBDR collects exhaustive browser-side telemetry including:
+*   **Advanced Heuristics Engine**:
+    *   **Typosquatting Detection**: Uses Levenshtein distance to detect look-alike domains (e.g., `paypaI.com` vs `paypal.com`) and can actively block navigation.
+    *   **Entropy Analysis**: Calculates Shannon Entropy of injected scripts to identify highly obfuscated or packed malicious code.
+*   **Deep Visibility**: 
+    *   **Shadow DOM Monitoring**: Hooks into `attachShadow` to track activity hidden within encapsulated web components.
+    *   **Network Metadata**: Captures request/response metadata, security headers, and initiator chains.
+    *   **DOM Mutation Tracking**: Monitors script, iframe, and form injections in real-time.
+*   **Service-Oriented Architecture**:
+    *   **Background Daemon**: A dedicated `systemd` service manages persistence and log forwarding independently of the browser lifecycle.
+    *   **Two-Way Communication**: Low-latency bridge between the browser extension and the local system daemon.
+*   **Reliable Forwarding**: Automatically batches and transmits logs to a remote SIEM or centralized server with local SQLite buffering.
 
-- **Browser & Environment**: Browser details, OS, User-Agent, locale, timezone, installed extensions
-- **Navigation & Web Activity**: URLs, referrers, tab events, window focus, downloads
-- **DOM & Script Signals**: Dynamic DOM modifications, script injections, CSP violations
-- **Network Metadata**: Request/response metadata, redirect chains, security headers
-- **Security Signals**: Suspicious URLs, clipboard access, file uploads, form submissions
+## System Architecture
 
-All telemetry is stored locally in JSONL format, ready for SIEM ingestion (KQL, Splunk, etc.).
+1.  **Browser Extension (MV3)**: Collects telemetry and applies real-time heuristics.
+2.  **Native Messaging Bridge**: A lightweight proxy that forwards data from the browser to the daemon.
+3.  **OpenBDR Daemon (systemd)**: The core engine that stores data in SQLite and manages remote forwarding.
 
-## Installation
+## Quick Start (from Bundle)
 
-### Chrome / Edge (Chromium-based browsers)
+If you have the distribution bundle (`openbdr_v1.0.0.tar.gz`):
 
-1. Open `chrome://extensions/` (or `edge://extensions/`)
-2. Enable **Developer mode** (toggle in top-right)
-3. Click **Load unpacked**
-4. Select the `OpenBDR` directory
-5. The extension icon should appear in your toolbar
+1.  **Extract the bundle**:
+    ```bash
+    tar -xzvf openbdr_v1.0.0.tar.gz
+    cd openbdr_v1.0.0
+    ```
+2.  **Run the master installer**:
+    ```bash
+    ./install.sh
+    ```
+3.  **Load the Extension**:
+    *   Open `chrome://extensions/`
+    *   Enable **Developer mode**
+    *   Click **Load unpacked** and select the `extension/` folder.
+4.  **Configuration**:
+    Edit `~/.openbdr/config.json` to set your `forwardingUrl` for remote logging.
 
-## Usage
+## Development & Control
 
-### Viewing Telemetry
-
-Click the OpenBDR icon in your browser toolbar to see:
-- Total event count
-- Storage usage
-- Events by category breakdown
-
-### Exporting Logs
-
-1. Click the **Export Logs** button in the popup
-2. Choose a save location
-3. Logs are exported as `openbdr_logs_[timestamp].jsonl`
-
-### Log Format
-
-Each line is a JSON object with:
-```json
-{
-  "timestamp": "2024-01-15T12:30:45.123Z",
-  "eventId": "1705321845123-abc123def",
-  "eventType": "navigation.completed",
-  "payload": { ... },
-  "metadata": { "extensionVersion": "1.0.0" }
-}
-```
+*   **Restart Daemon**: `sudo systemctl restart openbdr`
+*   **Check Stats**: `sudo systemctl status openbdr`
+*   **View Logs**: `journalctl -u openbdr -f`
+*   **Local DB**: `sqlite3 ~/.openbdr/logs/openbdr.db`
 
 ## Event Types
 
 | Category | Events |
 |----------|--------|
-| `browser` | `info`, `extensions`, `permissions` |
-| `tab` | `created`, `updated`, `removed`, `activated`, `replaced` |
-| `window` | `created`, `removed`, `focusChanged` |
-| `navigation` | `beforeNavigate`, `committed`, `completed`, `error`, `domContentLoaded`, `historyStateUpdated` |
-| `download` | `created`, `changed` |
-| `webRequest` | `beforeRequest`, `headersReceived`, `completed`, `error`, `redirect` |
-| `dom` | `scriptInjected`, `iframeInjected`, `formInjected`, `attributeChanged` |
-| `security` | `formSubmit`, `clipboardCopy`, `clipboardPaste`, `fileUpload`, `cspViolation`, `mixedContent`, `jsError` |
-| `page` | `load` |
+| `detection` | `page.load` (Typosquatting), `dom.scriptInjected` (Entropy) |
+| `response` | `response.action` (Active Blocking) |
+| `dom` | `scriptInjected`, `iframeInjected`, `shadowRootCreated`, `formInjected` |
+| `network` | `webRequest.beforeRequest`, `webRequest.headersReceived`, `navigation.committed` |
+| `security` | `formSubmit`, `clipboardCopy`, `jsError`, `cspViolation` |
 
-## Project Structure
-
-```
-OpenBDR/
-├── manifest.json           # Extension manifest (MV3)
-├── background/
-│   └── service-worker.js   # Background event listeners
-├── content/
-│   └── content-script.js   # Page-level monitoring
-├── lib/
-│   ├── logger.js           # JSONL logging module
-│   ├── telemetry.js        # Browser info collection
-│   └── utils.js            # Utility functions
-├── popup/
-│   ├── popup.html          # Popup UI
-│   └── popup.js            # Popup logic
-└── icons/
-    └── *.png               # Extension icons
-```
-
-## Development
-
-### Testing
-
-1. Load the extension in Chrome Developer mode
-2. Browse various websites
-3. Trigger actions: downloads, form submissions, tab switching
-4. Export logs and verify JSON validity:
-   ```bash
-   cat openbdr_logs.jsonl | jq .
-   ```
-
-### Debugging
-
-- Background script: `chrome://extensions/` → OpenBDR → "service worker" link
-- Content script: Open DevTools on any page, check Console for `[OpenBDR]` messages
-- Storage: `chrome://extensions/` → OpenBDR → "Inspect views" → Console → `chrome.storage.local.get(console.log)`
-
-## Security Considerations
-
-- All data is stored **locally only** - no external transmission
-- Sensitive values (passwords, tokens) are automatically redacted
-- Extension requests itself are excluded from logging
-
-## Author
-
-**Ishan Patel**  
-Email: ishan.patel1998@gmail.com  
-GitHub: ishan3299
-
-## License
-
-This project is developed for research and enterprise security use cases.
+---
+Developed by **Ishan Patel**

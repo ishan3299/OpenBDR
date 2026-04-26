@@ -118,6 +118,9 @@ if (!window.__OPENBDR_INITIALIZED__) {
                 // Script injection detection
                 if (node.nodeName === 'SCRIPT') {
                     const textContent = node.textContent || '';
+                    const entropy = OpenBDRUtils.getShannonEntropy(textContent);
+                    const isHighlyObfuscated = !node.src && textContent.length > 200 && entropy > 5.0;
+
                     logEvent('dom.scriptInjected', {
                         src: node.src || null,
                         type: node.type || 'text/javascript',
@@ -126,6 +129,8 @@ if (!window.__OPENBDR_INITIALIZED__) {
                         hasInlineCode: !node.src && textContent.length > 0,
                         inlineCodeSnippet: !node.src ? textContent.substring(0, 1024) : null,
                         inlineCodeLength: textContent.length,
+                        entropy: entropy,
+                        isHighlyObfuscated: isHighlyObfuscated,
                         ...getPageContext(),
                     });
                 }
@@ -198,8 +203,13 @@ if (!window.__OPENBDR_INITIALIZED__) {
     });
 
     // Start observing when DOM is ready
-    function startMutationObserver() {
-        mutationObserver.observe(document.documentElement || document.body, {
+    function startMutationObserver(root = document.documentElement || document.body) {
+        if (!root || !(root instanceof Node)) {
+            console.warn('[OpenBDR] Cannot observe non-Node element:', root);
+            return;
+        }
+
+        mutationObserver.observe(root, {
             childList: true,
             subtree: true,
             attributes: true,
@@ -208,8 +218,24 @@ if (!window.__OPENBDR_INITIALIZED__) {
         });
     }
 
+    // Shadow DOM Monitoring Hook
+    const originalAttachShadow = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function (init) {
+        const shadowRoot = originalAttachShadow.call(this, init);
+        // Observe mutations inside the new shadow root
+        startMutationObserver(shadowRoot);
+        
+        logEvent('dom.shadowRootCreated', {
+            element: this.nodeName.toLowerCase(),
+            mode: init.mode,
+            ...getPageContext(),
+        });
+        
+        return shadowRoot;
+    };
+
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', startMutationObserver);
+        document.addEventListener('DOMContentLoaded', () => startMutationObserver());
     } else {
         startMutationObserver();
     }
@@ -472,6 +498,20 @@ if (!window.__OPENBDR_INITIALIZED__) {
     // Security Relevance: Baseline context for all subsequent events
     // ============================================================================
 
+    // Typosquatting detection against high-value targets
+    const HIGH_VALUE_TARGETS = ['google.com', 'microsoft.com', 'paypal.com', 'facebook.com', 'amazon.com', 'apple.com', 'github.com'];
+    const currentHostname = window.location.hostname;
+    const typosquattingFindings = [];
+
+    if (!HIGH_VALUE_TARGETS.includes(currentHostname)) {
+        HIGH_VALUE_TARGETS.forEach(target => {
+            const distance = OpenBDRUtils.getLevenshteinDistance(currentHostname, target);
+            if (distance > 0 && distance <= 2) {
+                typosquattingFindings.push({ target, distance });
+            }
+        });
+    }
+
     logEvent('page.load', {
         ...getPageContext(),
         documentReadyState: document.readyState,
@@ -484,6 +524,8 @@ if (!window.__OPENBDR_INITIALIZED__) {
         images: document.images.length,
         links: document.links.length,
         frames: window.frames.length,
+        typosquatting: typosquattingFindings.length > 0 ? typosquattingFindings : null,
+        isSuspiciousTyposquat: typosquattingFindings.length > 0,
     });
 
     console.log('[OpenBDR] Content script initialized');

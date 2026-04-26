@@ -28,6 +28,7 @@ yarn-error.log
 dist/
 build/
 *.zip
+*.tar.gz
 
 # Logs and Databases
 *.log
@@ -35,6 +36,7 @@ logs/
 *.db
 *.db-wal
 *.db-shm
+~/.openbdr/
 
 # Python
 __pycache__/
@@ -51,5 +53,8 @@ __pycache__/
 *.pem
 native_host/com.openbdr.host.json
 
-# Residual files
-test_bridge.py
+# Service Files
+openbdr.service
+openbdr-enhancements-plan.md
+test_host.py
+test_heuristics.js

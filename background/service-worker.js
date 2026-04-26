@@ -70,12 +70,57 @@ async function dispatchLog(eventType, payload, metadata = {}) {
     // 1. Sanitize payload
     const sanitizedPayload = OpenBDRUtils.sanitizePayload(payload);
 
-    // 2. Direct to Native Host (SQLite)
+    // DEBUG: Log all page loads to see what is coming through
+    if (eventType === 'page.load') {
+        console.log('[OpenBDR] Processing page load:', sanitizedPayload.hostname, 'Suspicious:', sanitizedPayload.isSuspiciousTyposquat);
+    }
+
+    // 2. Active Response: Block suspicious domains (typosquatting or static patterns)
+    if (eventType === 'page.load' && sanitizedPayload.isSuspiciousTyposquat) {
+        console.warn('[OpenBDR] Typosquatting detected for:', sanitizedPayload.hostname);
+        await activateResponseBlocking(sanitizedPayload.hostname);
+    }
+
+    // 3. Direct to Native Host (SQLite)
     // The nativeLogger class handles internal in-memory buffering if disconnected
     try {
         return await nativeLogger.log(eventType, sanitizedPayload, metadata);
     } catch (e) {
         console.warn('[OpenBDR] Logging to native host failed:', e);
+    }
+}
+
+/**
+ * Activate active response blocking for a specific domain
+ * Uses declarativeNetRequest to block navigation
+ */
+async function activateResponseBlocking(hostname) {
+    console.warn(`[OpenBDR] Activating active response blocking for suspicious domain: ${hostname}`);
+    
+    const ruleId = Math.floor(Math.random() * 1000000) + 1;
+    
+    try {
+        await chrome.declarativeNetRequest.updateDynamicRules({
+            addRules: [{
+                id: ruleId,
+                priority: 1,
+                action: { type: 'block' },
+                condition: {
+                    urlFilter: hostname,
+                    resourceTypes: ['main_frame', 'sub_frame']
+                }
+            }],
+            removeRuleIds: [] // Cleanup could be implemented with a TTL
+        });
+        
+        await dispatchLog('response.action', {
+            action: 'block_domain',
+            hostname: hostname,
+            ruleId: ruleId,
+            timestamp: new Date().toISOString()
+        });
+    } catch (e) {
+        console.error('[OpenBDR] Failed to apply blocking rule:', e);
     }
 }
 

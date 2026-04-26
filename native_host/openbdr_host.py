@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 OpenBDR Native Messaging Host
-Handles direct system-level logging using SQLite.
+Handles direct system-level logging using SQLite and optional remote forwarding.
 
 Features:
 - Structured storage with SQLite
-- Time-based partitioning (stored as metadata in DB)
+- Background log forwarding via HTTP
 - Automatic transaction management
 - State persistence for crash recovery
 - Browser session lifecycle handling
@@ -19,6 +19,9 @@ import datetime
 import signal
 import traceback
 import sqlite3
+import threading
+import time
+import urllib.request
 
 # Configuration
 DEFAULT_BASE_DIR = os.path.expanduser("~/.openbdr")
@@ -26,12 +29,25 @@ CONFIG_FILE = os.path.join(DEFAULT_BASE_DIR, "config.json")
 STATE_FILE = os.path.join(DEFAULT_BASE_DIR, "state.json")
 DEFAULT_DB_FILE = os.path.join(DEFAULT_BASE_DIR, "openbdr.db")
 FLUSH_BATCH_SIZE = 10  # Number of events before commit
+FORWARD_INTERVAL = 30  # Seconds between forwarding attempts
+FORWARD_BATCH_SIZE = 50
 
+
+DEBUG_LOG = os.path.join(DEFAULT_BASE_DIR, "host_debug.log")
+
+def log_debug(msg):
+    try:
+        with open(DEBUG_LOG, "a") as f:
+            f.write(f"{datetime.datetime.now().isoformat()} - {msg}\n")
+    except:
+        pass
 
 class OpenBDRHost:
     def __init__(self):
+        log_debug("Host initializing...")
         self.base_dir = DEFAULT_BASE_DIR
         self.db_file = DEFAULT_DB_FILE
+        self.forwarding_url = None
         self.db_conn = None
         self.last_event_id = None
         self.buffer_count = 0
@@ -44,6 +60,15 @@ class OpenBDRHost:
         self.load_config()
         self.init_sqlite()
         self.load_state()
+
+        # Start forwarding thread
+        if self.forwarding_url:
+            log_debug(f"Starting forwarding thread for {self.forwarding_url}")
+            try:
+                self.forward_thread = threading.Thread(target=self.forward_worker, daemon=True)
+                self.forward_thread.start()
+            except Exception as e:
+                log_debug(f"Failed to start thread: {e}")
     
     def load_config(self):
         """Load configuration from file"""
@@ -51,6 +76,7 @@ class OpenBDRHost:
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r') as f:
                     config = json.load(f)
+                    self.forwarding_url = config.get('forwardingUrl')
                     # Support legacy logDir if present, but default to base_dir
                     log_dir = config.get('logDir')
                     if log_dir:
@@ -66,7 +92,8 @@ class OpenBDRHost:
             os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
             with open(CONFIG_FILE, 'w') as f:
                 json.dump({
-                    'dbFile': self.db_file
+                    'dbFile': self.db_file,
+                    'forwardingUrl': self.forwarding_url
                 }, f, indent=2)
         except Exception as e:
             self.log_error(f"Failed to save config: {e}")
@@ -75,7 +102,7 @@ class OpenBDRHost:
         """Initialize SQLite database"""
         try:
             os.makedirs(os.path.dirname(self.db_file), exist_ok=True)
-            self.db_conn = sqlite3.connect(self.db_file)
+            self.db_conn = sqlite3.connect(self.db_file, check_same_thread=False)
             
             # Optimization: Enable Write-Ahead Logging (WAL) for better concurrency
             self.db_conn.execute('PRAGMA journal_mode=WAL')
@@ -88,15 +115,24 @@ class OpenBDRHost:
                     timestamp TEXT,
                     eventType TEXT,
                     payload TEXT,
-                    metadata TEXT
+                    metadata TEXT,
+                    forwarded INTEGER DEFAULT 0
                 )
             ''')
+            
+            # Migration: Add forwarded column if it doesn't exist
+            try:
+                cursor.execute('ALTER TABLE events ADD COLUMN forwarded INTEGER DEFAULT 0')
+            except sqlite3.OperationalError:
+                pass # Already exists
+
             # Index for performance on time-based queries
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON events(timestamp)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_type ON events(eventType)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_forwarded ON events(forwarded)')
             
             self.db_conn.commit()
-            self.log_error(f"SQLite database initialized: {self.db_file}")
+            log_debug(f"SQLite database initialized: {self.db_file}")
         except Exception as e:
             self.log_error(f"Failed to initialize SQLite: {e}")
             sys.exit(1)
@@ -133,7 +169,7 @@ class OpenBDRHost:
             cursor = self.db_conn.cursor()
             
             cursor.execute(
-                "INSERT OR REPLACE INTO events (eventId, timestamp, eventType, payload, metadata) VALUES (?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO events (eventId, timestamp, eventType, payload, metadata, forwarded) VALUES (?, ?, ?, ?, ?, 0)",
                 (
                     event.get('eventId'),
                     event.get('timestamp'),
@@ -162,10 +198,73 @@ class OpenBDRHost:
                 self.save_state()
             except Exception as e:
                 self.log_error(f"Failed to commit SQLite transaction: {e}")
+
+    def forward_worker(self):
+        """Background worker for log forwarding"""
+        log_debug("Forwarding worker started")
+        while self.running:
+            try:
+                if self.forwarding_url:
+                    self.perform_forwarding()
+            except Exception as e:
+                self.log_error(f"Forwarding error: {e}")
+            time.sleep(FORWARD_INTERVAL)
+
+    def perform_forwarding(self):
+        """Fetch and forward unforwarded events"""
+        if not self.db_conn:
+            return
+
+        cursor = self.db_conn.cursor()
+        cursor.execute(
+            "SELECT eventId, timestamp, eventType, payload, metadata FROM events WHERE forwarded = 0 LIMIT ?",
+            (FORWARD_BATCH_SIZE,)
+        )
+        rows = cursor.fetchall()
+        
+        if not rows:
+            return
+
+        log_debug(f"Attempting to forward {len(rows)} events")
+        events = []
+        event_ids = []
+        for row in rows:
+            events.append({
+                'eventId': row[0],
+                'timestamp': row[1],
+                'eventType': row[2],
+                'payload': json.loads(row[3]),
+                'metadata': json.loads(row[4])
+            })
+            event_ids.append(row[0])
+
+        # Attempt to send via HTTP
+        try:
+            data = json.dumps({'events': events}).encode('utf-8')
+            req = urllib.request.Request(
+                self.forwarding_url,
+                data=data,
+                headers={'Content-Type': 'application/json', 'User-Agent': 'OpenBDR-Host/1.0'}
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if 200 <= response.status < 300:
+                    # Mark as forwarded
+                    placeholders = ','.join(['?'] * len(event_ids))
+                    cursor.execute(
+                        f"UPDATE events SET forwarded = 1 WHERE eventId IN ({placeholders})",
+                        event_ids
+                    )
+                    self.db_conn.commit()
+                    log_debug(f"Successfully forwarded {len(events)} events")
+                else:
+                    self.log_error(f"Forwarding failed with status: {response.status}")
+        except Exception as e:
+            self.log_error(f"Failed to forward events to {self.forwarding_url}: {e}")
     
     def handle_message(self, message):
         """Handle incoming message from extension"""
         msg_type = message.get('type')
+        log_debug(f"Handling message type: {msg_type}")
         
         if msg_type == 'SESSION_START':
             # Log session start event
@@ -175,7 +274,7 @@ class OpenBDRHost:
                 'eventType': 'session.start',
                 'payload': message.get('payload', {})
             })
-            return {'success': True, 'db': self.db_file}
+            return {'success': True, 'db': self.db_file, 'forwarding': self.forwarding_url is not None}
         
         elif msg_type == 'SESSION_END':
             # Log session end event
@@ -208,6 +307,10 @@ class OpenBDRHost:
                 cursor.execute("SELECT COUNT(*) FROM events")
                 total_events = cursor.fetchone()[0]
                 
+                # Get forwarded count
+                cursor.execute("SELECT COUNT(*) FROM events WHERE forwarded = 1")
+                forwarded_events = cursor.fetchone()[0]
+                
                 # Get breakdown by type
                 cursor.execute("SELECT eventType, COUNT(*) FROM events GROUP BY eventType")
                 type_rows = cursor.fetchall()
@@ -216,6 +319,7 @@ class OpenBDRHost:
             except Exception as e:
                 self.log_error(f"Failed to fetch stats: {e}")
                 total_events = 0
+                forwarded_events = 0
                 event_types = {}
 
             return {
@@ -223,24 +327,40 @@ class OpenBDRHost:
                 'connected': True,
                 'storageType': 'SQLite',
                 'dbFile': self.db_file,
+                'forwardingUrl': self.forwarding_url,
                 'totalEvents': total_events,
+                'forwardedEvents': forwarded_events,
                 'eventTypes': event_types,
                 'lastEventId': self.last_event_id
             }
         
         elif msg_type == 'SET_CONFIG':
             config = message.get('config', {})
+            restart_forwarder = False
+            
             if 'dbFile' in config:
                 self.flush()
                 self.db_conn.close()
                 self.db_file = config['dbFile']
                 self.init_sqlite()
-                self.save_config()
+            
+            if 'forwardingUrl' in config:
+                self.forwarding_url = config['forwardingUrl']
+                restart_forwarder = True
 
-            return {'success': True, 'dbFile': self.db_file}
+            self.save_config()
+            
+            if restart_forwarder and self.forwarding_url:
+                if not hasattr(self, 'forward_thread') or not self.forward_thread.is_alive():
+                    self.forward_thread = threading.Thread(target=self.forward_worker, daemon=True)
+                    self.forward_thread.start()
+
+            return {'success': True, 'dbFile': self.db_file, 'forwardingUrl': self.forwarding_url}
         
         elif msg_type == 'FLUSH':
             self.flush()
+            if self.forwarding_url:
+                self.perform_forwarding()
             return {'success': True}
         
         elif msg_type == 'PING':
@@ -251,6 +371,8 @@ class OpenBDRHost:
     
     def close(self):
         """Clean shutdown"""
+        log_debug("Host closing...")
+        self.running = False
         if self.db_conn:
             try:
                 self.db_conn.commit()
@@ -261,7 +383,8 @@ class OpenBDRHost:
         self.save_state()
     
     def log_error(self, message):
-        """Log error to stderr (visible in Chrome's extension error log)"""
+        """Log error to stderr and debug file"""
+        log_debug(f"ERROR: {message}")
         sys.stderr.write(f"[OpenBDR Host] {message}\n")
         sys.stderr.flush()
 
@@ -269,27 +392,40 @@ class OpenBDRHost:
 # Native messaging protocol helpers
 def read_message():
     """Read a message from stdin using Chrome's native messaging protocol"""
-    raw_length = sys.stdin.buffer.read(4)
-    if not raw_length:
+    try:
+        raw_length = sys.stdin.buffer.read(4)
+        if not raw_length:
+            return None
+        message_length = struct.unpack('I', raw_length)[0]
+        message = sys.stdin.buffer.read(message_length).decode('utf-8')
+        return json.loads(message)
+    except Exception as e:
+        sys.stderr.write(f"[OpenBDR Host] Error reading message: {e}\n")
+        sys.stderr.flush()
         return None
-    message_length = struct.unpack('I', raw_length)[0]
-    message = sys.stdin.buffer.read(message_length).decode('utf-8')
-    return json.loads(message)
 
 
 def send_message(message):
     """Send a message to stdout using Chrome's native messaging protocol"""
-    encoded = json.dumps(message).encode('utf-8')
-    sys.stdout.buffer.write(struct.pack('I', len(encoded)))
-    sys.stdout.buffer.write(encoded)
-    sys.stdout.buffer.flush()
+    try:
+        encoded = json.dumps(message).encode('utf-8')
+        sys.stdout.buffer.write(struct.pack('I', len(encoded)))
+        sys.stdout.buffer.write(encoded)
+        sys.stdout.buffer.flush()
+    except Exception as e:
+        sys.stderr.write(f"[OpenBDR Host] Error sending message: {e}\n")
+        sys.stderr.flush()
 
 
 def main():
     """Main entry point"""
+    sys.stderr.write("[OpenBDR Host] Starting main loop...\n")
+    sys.stderr.flush()
     host = OpenBDRHost()
     
     def cleanup(signum=None, frame=None):
+        sys.stderr.write(f"[OpenBDR Host] Cleaning up (Signal: {signum})...\n")
+        sys.stderr.flush()
         host.close()
         sys.exit(0)
     
